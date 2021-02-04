@@ -20,7 +20,7 @@
 #include <QMessageBox>
 #include <QSizePolicy>
 #include <QTabBar>
-
+#include <QSettings>
 
 #include <iostream>
 #include <sstream>
@@ -100,8 +100,8 @@ RockOutcrop::RockOutcrop(QWidget *parent) :
     // set the global stylesheet
     QFile file(":/resources/styles/stylesheet.css");
     if(file.open(QFile::ReadOnly)) {
-      QString styleSheet = QLatin1String(file.readAll());
-      this->setStyleSheet(styleSheet);
+        QString styleSheet = QLatin1String(file.readAll());
+        this->setStyleSheet(styleSheet);
     }
 
 
@@ -191,7 +191,7 @@ RockOutcrop::RockOutcrop(QWidget *parent) :
     resultsTab->addTab(meshContainer,"Mesh");
 
     postProcessor = new PostProcessor(outputDir);
-    profiler = new ProfileManager(resultsTab, postProcessor ,this);   
+    profiler = new ProfileManager(resultsTab, postProcessor ,this);
     //connect(postProcessor, SIGNAL(updateFinished()), profiler, SLOT(onPostProcessorUpdated()));
     //postProcessor->update();
 
@@ -202,10 +202,10 @@ RockOutcrop::RockOutcrop(QWidget *parent) :
     // set stylesheet for the profile tab
     QFile profileCSSfile(":/resources/styles/profile.css");
     if(profileCSSfile.open(QFile::ReadOnly)) {
-      QString styleSheet = QLatin1String(profileCSSfile.readAll());
-      //QTabBar *configTabBar = resultsTab->findChild<QTabBar *>("qt_tabwidget_tabbar");
-      resultsTab->setStyleSheet(styleSheet);
-      profileCSSfile.close();
+        QString styleSheet = QLatin1String(profileCSSfile.readAll());
+        //QTabBar *configTabBar = resultsTab->findChild<QTabBar *>("qt_tabwidget_tabbar");
+        resultsTab->setStyleSheet(styleSheet);
+        profileCSSfile.close();
     }
 
 
@@ -362,7 +362,6 @@ RockOutcrop::RockOutcrop(QWidget *parent) :
         QDir().mkdir(outputDir);
 
     //ui->tabWidget->hide();
-
 }
 
 void RockOutcrop::on_gwtEdit_editingFinished()
@@ -379,25 +378,106 @@ void RockOutcrop::onConfigTabUpdated()
 
 
 
-bool  RockOutcrop::copyFiles(QString &destDir)
+bool RockOutcrop::copyFiles(QString &destDir)
 {
+    int simDim = this->checkDimension();
+    theTabManager->writeGM();
+    this->on_runBtn_clicked(); // link EE-UQ run button with analyze
     QString fileName = "EVENT.json";
-    QFile::copy(evtjFileName, destDir + "/" + fileName);
+    if (m_runningStochastic) {
+        // for stochastic field
+        fileName = "model.tcl"; // SRT model template
+        QFile::copy(analysisDir + "/" + fileName, destDir + "/" + fileName);
+        fileName = "Rock-x.vel";  // input motion
+        QFile::copy(analysisDir + "/" + fileName, destDir + "/" + fileName);
+        if (simDim == 3) {
+            fileName = "Rock-y.vel";  // input motion
+            QFile::copy(analysisDir + "/" + fileName, destDir + "/" + fileName);
+        }
+        fileName = "EVENT.json";
+        theTabManager->writeSurfaceMotion();
+        QFile::copy(analysisDir + "/" + fileName, destDir + "/" + fileName);
+    } else {
+        fileName = "model.tcl"; // SRT model template
+        QFile::copy(analysisDir + "/" + fileName, destDir + "/" + fileName);
+        fileName = "Rock-x.vel";  // input motion
+        QFile::copy(analysisDir + "/" + fileName, destDir + "/" + fileName);
+        if (simDim == 3) {
+            fileName = "Rock-y.vel";  // input motion
+            QFile::copy(analysisDir + "/" + fileName, destDir + "/" + fileName);
+        }
+        // theTabManager->writeSurfaceMotion();
+        // QFile::copy(evtjFileName, destDir + "/" + fileName);
+    }
     return true;
 }
 
 
 void RockOutcrop::loadFromJson()
 {
-
-
     QString in;
     QFile inputFile(srtFileName);
     if(inputFile.open(QFile::ReadOnly)) {
-    //inputFile.open(QIODevice::ReadOnly | QIODevice::Text);
-    in = inputFile.readAll();
-    inputFile.close();
-    }else{
+        //inputFile.open(QIODevice::ReadOnly | QIODevice::Text);
+        in = inputFile.readAll();
+        inputFile.close();
+        QJsonDocument indoc = QJsonDocument::fromJson(in.toUtf8());
+        QJsonObject inobj = indoc.object();
+
+        QJsonObject basicSettings = inobj["basicSettings"].toObject();
+        QString groundMotion = basicSettings["groundMotion"].toString();
+        if(groundMotion=="") groundMotion = "Input the path of a ground motion file. ";
+        theTabManager->updateGMPath(groundMotion);
+        QString OpenSeesPath = basicSettings["OpenSeesPath"].toString();
+        if(OpenSeesPath=="") OpenSeesPath = "Input the full path of OpenSees excutable. ";
+        theTabManager->updateOpenSeesPath(OpenSeesPath);
+        QString slopex1 = QString::number(basicSettings["slopex1"].toDouble(), 'g', 16);
+        QString slopex2 = QString::number(basicSettings["slopex2"].toDouble(), 'g', 16);
+
+
+        QJsonArray soilLayers = inobj["soilProfile"].toObject()["soilLayers"].toArray();
+        QJsonArray materials = inobj["materials"].toArray();
+        ui->totalLayerLineEdit->setText(QString::number(soilLayers.size()));
+        for (int i=soilLayers.size()-1; i>=0; i--)
+        {
+            QJsonObject l = soilLayers[i].toObject();
+            QString name = l["name"].toString();
+            QString color = l["color"].toString();
+            int id = l["id"].toInt();
+            QJsonObject mat = materials[i].toObject();
+            QString material = materials[i].toObject()["type"].toString();
+            double Dr = l["Dr"].toDouble();
+            double density = l["density"].toDouble();
+            double eSize = l["eSize"].toDouble();
+            double hPerm = l["hPerm"].toDouble();
+            double vPerm = l["vPerm"].toDouble();
+            double thickness = l["thickness"].toDouble();
+            double vs = l["vs"].toDouble();
+
+            if (i==soilLayers.size()-1)// Rock
+            {
+                QList<QVariant> valueListRock;
+                valueListRock << "Rock" << "-" << density << vs << DefaultEType << "-";
+                ui->tableView->insertAt(valueListRock,0);
+            }else{
+                QList<QVariant> valueList;
+                if (color=="")
+                    color = QColor::fromRgb(QRandomGenerator::global()->generate()).name();
+                valueList << name << thickness << density << vs << material << eSize << color;
+                //ui->tableView->insertAtSilent(valueList,0);
+                ui->tableView->insertAt(valueList,0);
+
+            }
+            theTabManager->updateLayerTab(l,mat);
+        }
+
+        ui->gwtEdit->setText(QString::number(basicSettings["groundWaterTable"].toDouble()));
+
+        ui->totalLayerLineEdit->setText(QString::number(soilLayers.size()));
+
+        theTabManager->updateConfigureTabFromOutside(slopex1, slopex2);
+
+    } else {
         // if no input file provided add a default layer
         if(ui->tableView->m_sqlModel->rowCount()<1)
         {
@@ -406,91 +486,18 @@ void RockOutcrop::loadFromJson()
             ui->tableView->insertAt(valueListRock,0);
             ui->tableView->setTotalHeight(0);
             ui->totalHeight->setText("0");
-            ui->totalLayerLineEdit->setText("1");
-
 
             QList<QVariant> valueList;
             valueList << "Layer 1" << DefaultThickness << DefaultDensity << DefaultVs << DefaultEType << DefaultESize << "#64B5F6";
             ui->tableView->insertAt(valueList,0);
             ui->totalHeight->setText(QString::number(DefaultThickness));
             ui->totalLayerLineEdit->setText("2");
-
+        } else {
+            ui->totalLayerLineEdit->setText(QString::number(ui->tableView->m_sqlModel->rowCount()));
         }
     }
-
-    QJsonDocument indoc = QJsonDocument::fromJson(in.toUtf8());
-    QJsonObject inobj = indoc.object();
-
-
-
-
-    QJsonObject basicSettings = inobj["basicSettings"].toObject();
-    QString groundMotion = basicSettings["groundMotion"].toString();
-    if(groundMotion=="") groundMotion = "Input the path of a ground motion file. ";
-    theTabManager->updateGMPath(groundMotion);
-    QString OpenSeesPath = basicSettings["OpenSeesPath"].toString();
-    if(OpenSeesPath=="") OpenSeesPath = "Input the full path of OpenSees excutable. ";
-    theTabManager->updateOpenSeesPath(OpenSeesPath);
-    QString slopex1 = QString::number(basicSettings["slopex1"].toDouble(), 'g', 16);
-    QString slopex2 = QString::number(basicSettings["slopex2"].toDouble(), 'g', 16);
-
-
-    QJsonArray soilLayers = inobj["soilProfile"].toObject()["soilLayers"].toArray();
-    QJsonArray materials = inobj["materials"].toArray();
-    for (int i=soilLayers.size()-1; i>=0; i--)
-    {
-        QJsonObject l = soilLayers[i].toObject();
-        QString name = l["name"].toString();
-        QString color = l["color"].toString();
-        int id = l["id"].toInt();
-        QJsonObject mat = materials[i].toObject();
-        QString material = materials[i].toObject()["type"].toString();
-        double Dr = l["Dr"].toDouble();
-        double density = l["density"].toDouble();
-        double eSize = l["eSize"].toDouble();
-        double hPerm = l["hPerm"].toDouble();
-        double vPerm = l["vPerm"].toDouble();
-        double thickness = l["thickness"].toDouble();
-        double vs = l["vs"].toDouble();
-
-        if (i==soilLayers.size()-1)// Rock
-        {
-            QList<QVariant> valueListRock;
-            valueListRock << "Rock" << "-" << density << vs << DefaultEType << "-";
-            ui->tableView->insertAt(valueListRock,0);
-        }else{
-            QList<QVariant> valueList;
-            if (color=="")
-                color = QColor::fromRgb(QRandomGenerator::global()->generate()).name();
-            valueList << name << thickness << density << vs << material << eSize << color;
-            //ui->tableView->insertAtSilent(valueList,0);
-            ui->tableView->insertAt(valueList,0);
-
-        }
-
-
-
-        theTabManager->updateLayerTab(l,mat);
-
-    }
-
-
-
-
-
-
-
-    ui->gwtEdit->setText(QString::number(basicSettings["groundWaterTable"].toDouble()));
-
-    ui->totalLayerLineEdit->setText(QString::number(soilLayers.size()));
-
-    theTabManager->updateConfigureTabFromOutside(slopex1, slopex2);
-
 
     ui->reBtn->click();
-
-
-
 }
 
 
@@ -692,22 +699,22 @@ void RockOutcrop::onTotalLayerEdited()
     }
     else{
 
-    if(previousNumLayers < newNumLayers)
-    {
-        QList<QVariant> emptyList;
-        for (int i=0; i<(newNumLayers-previousNumLayers); i++)
-            ui->tableView->insertAtEnd(emptyList);
-    }
-    if(previousNumLayers > newNumLayers & newNumLayers>=0)
-    {
-        for (int i=previousNumLayers; i>newNumLayers; i--)
-            ui->tableView->removeOneRow(i-1);
-    }
-    if(previousNumLayers != newNumLayers)
-    {
-        qDebug() << "total layer changed from "<< previousNumLayers << " to " << newNumLayers;
-        ui->tableView->divideByLayers(previousHeight,newNumLayers);
-    }
+        if(previousNumLayers < newNumLayers)
+        {
+            QList<QVariant> emptyList;
+            for (int i=0; i<(newNumLayers-previousNumLayers); i++)
+                ui->tableView->insertAtEnd(emptyList);
+        }
+        if(previousNumLayers > newNumLayers & newNumLayers>=0)
+        {
+            for (int i=previousNumLayers; i>newNumLayers; i--)
+                ui->tableView->removeOneRow(i-1);
+        }
+        if(previousNumLayers != newNumLayers)
+        {
+            qDebug() << "total layer changed from "<< previousNumLayers << " to " << newNumLayers;
+            ui->tableView->divideByLayers(previousHeight,newNumLayers);
+        }
 
     }
 
@@ -1018,9 +1025,9 @@ bool RockOutcrop::outputToJSON(QJsonObject &root)
     QString in;
     QFile inputFile(srtFileName);
     if(inputFile.open(QFile::ReadOnly)) {
-    //inputFile.open(QIODevice::ReadOnly | QIODevice::Text);
-    in = inputFile.readAll();
-    inputFile.close();
+        //inputFile.open(QIODevice::ReadOnly | QIODevice::Text);
+        in = inputFile.readAll();
+        inputFile.close();
     }else{
         // if not input file provided add a default layer
         if(ui->tableView->m_sqlModel->rowCount()<1)
@@ -1051,18 +1058,18 @@ bool RockOutcrop::outputToJSON(QJsonObject &root)
 
 void RockOutcrop::on_killBtn_clicked()
 {
-        openseesProcess->kill();
-        if (shark)
-        {
-            shark->setStopSignal();
-            shark->requestInterruption();
-            shark->quit();
-            shark->wait();
-            delete shark;
-            shark = nullptr;
-        }
-        emit signalProgress(0);
-        ui->progressBar->hide();
+    openseesProcess->kill();
+    if (shark)
+    {
+        shark->setStopSignal();
+        shark->requestInterruption();
+        shark->quit();
+        shark->wait();
+        delete shark;
+        shark = nullptr;
+    }
+    emit signalProgress(0);
+    ui->progressBar->hide();
 
 }
 
@@ -1124,7 +1131,8 @@ void RockOutcrop::on_reBtn_clicked()
             std::istringstream iss(list.at(FEM-2).toString().toStdString());
             std::vector<std::string> pars((std::istream_iterator<std::string>(iss)),
                                           std::istream_iterator<std::string>());
-            double eSize = atof(pars[0].c_str());
+            // double eSize = atof(pars[0].c_str());
+            double eSize = list.at(ESIZE-2).toDouble();
             int id = i;
 
             int DrInd=0, hPermInd=0, vPermInd=0, uBulkInd=0, voidInd=0;
@@ -1152,8 +1160,16 @@ void RockOutcrop::on_reBtn_clicked()
             }else if(list.at(MATERIAL-2).toString()=="J2Bounding")
             {//TODO: double check
                 DrInd = 1; hPermInd = 10; vPermInd = 11; uBulkInd = 12; voidInd = 13;
+            }else if(list.at(MATERIAL-2).toString()=="PM4Sand_Random")
+            {//TODO: double check
+                DrInd = 1; hPermInd = 25; vPermInd = 26; uBulkInd = 27; voidInd = 28;
+            }else if(list.at(MATERIAL-2).toString()=="PDMY03" || list.at(MATERIAL-2).toString()=="PDMY03_Random")
+            {//TODO: double check
+                DrInd = 1; hPermInd = 24; vPermInd = 25; uBulkInd = 26; voidInd = 27;
+            } else if (list.at(MATERIAL-2).toString()=="Elastic_Random") {
+                //TODO: double check
+                DrInd = 3; hPermInd = 4; vPermInd = 5; uBulkInd = 6; voidInd = 3;
             }
-
 
             if(!list.at(LAYERNAME-2).toString().toStdString().compare("Rock"))
             {
@@ -1252,7 +1268,7 @@ int RockOutcrop::checkDimension()
         int layerContaining2DOnlyModel = ui->tableView->m_sqlModel->has2DOnlyModel();
         if (layerContaining2DOnlyModel>0)
         {
-            dimMsg = "Layer "+ QString::number(layerContaining2DOnlyModel)+" contains material which can only be used in 2D simulation.";
+            dimMsg = "Layer "+ QString::number(layerContaining2DOnlyModel)+" contains material which can only be used in 2D simulation. Change material or choose a different motion with one component.";
             return -1;
         }
         return 3; // 3D column
@@ -1288,17 +1304,35 @@ void RockOutcrop::on_runBtn_clicked()
         QMessageBox::information(this,tr("Dimension err"), dimMsg, tr("OK."));
     }
     else{
-        QString openseespath = theTabManager->openseespath();;//"OpenSees";//theTabManager->openseespath();
-        //QProcess* openseesTesterProcess = new QProcess(this);
-        //bool osrun = openseesProcess->startDetached(openseespath);
-        //osrun = true;
-        //int osrun = openseesProcess->execute("bash", QStringList() << "-c" <<  openseespath);
+        QString exportPath("export PATH=$PATH");
+        // QProcess *proc = new QProcess();
+        // proc->setProcessChannelMode(QProcess::SeparateChannels);
+        auto procEnv = QProcessEnvironment::systemEnvironment();
+        QString pathEnv = procEnv.value("PATH");
+        QSettings settings("SimCenter", "Common"); //These names will need to be constants to be shared
+        QVariant  pythonLocationVariant = settings.value("pythonExePath");
+        if (pythonLocationVariant.isValid()) {
+            QString python = pythonLocationVariant.toString();
+        }
 
-
-
+        QSettings settingsApplication("SimCenter", QCoreApplication::applicationName());
+        QVariant  openseesPathVariant = settingsApplication.value("openseesPath");
+        if (openseesPathVariant.isValid()) {
+            QFileInfo openseesFile(openseesPathVariant.toString());
+            if (openseesFile.exists()) {
+                QString openseesPath = openseesFile.absolutePath();
+                qDebug() << openseesPath;
+                qDebug() << openseesPathVariant;
+                pathEnv = openseesPath + ';' + pathEnv;
+                exportPath += ":" + openseesPath;
+            } else {
+                int msg = QMessageBox::information(this,tr("Path error"), "Please specify the correct path of OpenSees in the Preferences tab.", tr("OK"));
+            }
+        } else {
+            int msg = QMessageBox::information(this,tr("Path error"), "Please specify the correct path of OpenSees in the Preferences tab.", tr("OK"));
+        }
 
         QString rockmotionpath =  theTabManager->rockmotionpath();
-        bool openseesEmpty = openseespath=="" || openseespath=="Input the full path of OpenSees excutable.";
         bool rockEmpty = rockmotionpath=="" || rockmotionpath=="Input the path of a ground motion file.";
 
         QFile rocMojsonFile(rockmotionpath);
@@ -1314,8 +1348,6 @@ void RockOutcrop::on_runBtn_clicked()
             theTabManager->getTab()->setCurrentIndex(0);
 
         }else{
-
-            QFile openseesExefile(openseespath);
             // build tcl file
             ui->reBtn->click();
 
@@ -1324,71 +1356,34 @@ void RockOutcrop::on_runBtn_clicked()
 
             ui->progressBar->show();
 
-            if(openseesExefile.exists())
-            {   // do FEA in opensees
-
-                SiteResponse *srt = new SiteResponse(srtFileName.toStdString(),
-                                                     analysisDir.toStdString(),outputDir.toStdString(),femLog.toStdString());
-                if (simDim==3)
-                {
-                    theTabManager->setSimulationD(3);
-                    srt->buildTcl3D();
-                }
-                else
-                {
-                    theTabManager->setSimulationD(2);
-                    srt->buildTcl();
-                }
-
-                openseesProcess->start(openseespath,QStringList()<<tclName);
-                openseesErrCount = 1;
-                emit runBtnClicked();
-
-            } else {// internal FEA
-                if (simDim==3) theTabManager->setSimulationD(3);
-                else theTabManager->setSimulationD(2);
-
-
-                emit signalInvokeInternalFEA();
-                //emit runBtnClicked();
-
-                /*
-                SiteResponse *srt = new SiteResponse(srtFileName.toStdString(),
-                                                     analysisDir.toStdString(),
-                                                     outputDir.toStdString(),
-                                                     femLog.toStdString(),
-                                                     m_callbackptr );
-                if (simDim==3)
-                {
-                    theTabManager->setSimulationD(3);
-                    srt->run3D();
-                }
-                else
-                {
-                    theTabManager->setSimulationD(2);
-                    srt->run();
-                }
-                */
-
-                /*
-                int msg = QMessageBox::information(this,tr("Path error"), "Please specify the correct path of OpenSees in the Configure tab.", tr("OK, I'll do it."), tr("Tutorial"));
-                //QMessageBox::information(this,tr("Path error"), "OpenSees is not found in your environment. Analysis didn't run", tr("OK."));
-                if(msg==1)
-                {
-                    QString link = "https://nheri-simcenter.github.io/s3hark/#/start";
-                    QDesktopServices::openUrl(QUrl(link));
-                }
-                ui->progressBar->hide();
-                theTabManager->getTab()->setCurrentIndex(0);
-                */
-
-                //int msg = QMessageBox::information(this,tr("FEA Running"), "s3hark started.", tr("OK"));
-                //QMessageBox::information(this,tr("Path error"), "OpenSees is not found in your environment. Analysis didn't run", tr("OK."));
-
-
+            SiteResponse *srt = new SiteResponse(srtFileName.toStdString(),
+                                                 analysisDir.toStdString(),outputDir.toStdString(),femLog.toStdString());
+            if (simDim==3)
+            {
+                theTabManager->setSimulationD(3);
+                srt->buildTcl3D();
             }
+            else
+            {
+                theTabManager->setSimulationD(2);
+                srt->buildTcl();
+            }
+            m_runningStochastic = srt->runningStochastic(); // check if running random field
 
+            if (!m_runningStochastic)
+            {
+                openseesProcess->start(openseesPathVariant.toString(),QStringList()<<tclName);
+                // Let EE-UQ wait before running UQ engine
+                // openseesProcess->waitForFinished();
+                // openseesProcess->close();
+            } else {
+                // call python to create files for dakota, need external python script to create inputs for dakota
 
+                // pythonProcess->start(pythonpath);
+                // pythonProcess->close();
+            }
+            openseesErrCount = 1;
+            emit runBtnClicked();
         }
 
     }
@@ -1462,7 +1457,7 @@ void RockOutcrop::onInternalFEAInvoked()
 void RockOutcrop::onOpenSeesFinished()
 {
 
-    //writeSurfaceMotion();
+    // writeSurfaceMotion();
     QString str_err = openseesProcess->readAllStandardError();
 
     if(openseesErrCount==1)
@@ -1486,7 +1481,7 @@ void RockOutcrop::onOpenSeesFinished()
             theTabManager->getTab()->setCurrentIndex(2);
             resultsTab->setCurrentIndex(1);
 
-            QMessageBox::information(this,tr("OpenSees Information"), "Analysis is done.", tr("I know."));
+            // QMessageBox::information(this,tr("OpenSees Information"), "Analysis is done.", tr("I know."));
 
 
 
@@ -1525,7 +1520,7 @@ json RockOutcrop::createMaterial(int tag, std::string matType, std::string param
     };
     std::istringstream iss(parameters);
     std::vector<std::string> pars((std::istream_iterator<std::string>(iss)),
-                                     std::istream_iterator<std::string>());
+                                  std::istream_iterator<std::string>());
     if (!matType.compare("Elastic"))
     {
         double eSize = atof(pars[0].c_str());
@@ -1539,9 +1534,9 @@ json RockOutcrop::createMaterial(int tag, std::string matType, std::string param
     } else if (!matType.compare("PM4Sand"))
     {
         mat["Dr"] = atof(pars[1].c_str());
-        mat["G0"] = atof(pars[2].c_str());
+        mat["Go"] = atof(pars[2].c_str());
         mat["hpo"] = atof(pars[3].c_str());
-        mat["Den"] = atof(pars[4].c_str());
+        mat["rho"] = atof(pars[4].c_str());
         mat["P_atm"] = atof(pars[5].c_str());
         mat["h0"] = atof(pars[6].c_str());
         mat["emax"] = atof(pars[7].c_str());
@@ -1563,6 +1558,7 @@ json RockOutcrop::createMaterial(int tag, std::string matType, std::string param
         mat["m"] = atof(pars[22].c_str());
         mat["Fsed_min"] = atof(pars[23].c_str());
         mat["p_sedo"] = atof(pars[24].c_str());
+        mat["K0"] = atof(pars[29].c_str());
     } else if (!matType.compare("PM4Silt"))
     {
         mat["Dr"] = atof(pars[1].c_str());
@@ -1570,7 +1566,7 @@ json RockOutcrop::createMaterial(int tag, std::string matType, std::string param
         mat["Su_Rat"] = atof(pars[3].c_str());
         mat["G_o"] = atof(pars[4].c_str());
         mat["h_po"] = atof(pars[5].c_str());
-        mat["Den"] = atof(pars[6].c_str());
+        mat["rho"] = atof(pars[6].c_str());
         mat["Su_factor"] = atof(pars[7].c_str());
         mat["P_atm"] = atof(pars[8].c_str());
         mat["nu"] = atof(pars[9].c_str());
@@ -1593,6 +1589,7 @@ json RockOutcrop::createMaterial(int tag, std::string matType, std::string param
 
         mat["m_m"] = atof(pars[25].c_str());
         mat["CG_consol"] = atof(pars[26].c_str());
+        mat["K0"] = atof(pars[31].c_str());
 
     } else if (!matType.compare("PIMY"))
     {
@@ -1687,6 +1684,7 @@ json RockOutcrop::createMaterial(int tag, std::string matType, std::string param
         mat["z_max"] = atof(pars[17].c_str());
         mat["cz"] = atof(pars[18].c_str());
         mat["Den"] = atof(pars[19].c_str());
+        mat["K0"] = atof(pars[24].c_str());
 
     } else if (!matType.compare("J2Bounding"))
     {
@@ -1700,6 +1698,116 @@ json RockOutcrop::createMaterial(int tag, std::string matType, std::string param
         mat["k_in"] = atof(pars[8].c_str());
         mat["beta"] = atof(pars[9].c_str());
 
+    } else if (!matType.compare("PM4Sand_Random"))
+    {
+        mat["Dr"] = atof(pars[1].c_str());
+        mat["Go"] = atof(pars[2].c_str());
+        mat["hpo"] = atof(pars[3].c_str());
+        mat["rho"] = atof(pars[4].c_str());
+        mat["P_atm"] = atof(pars[5].c_str());
+        mat["h0"] = atof(pars[6].c_str());
+        mat["emax"] = atof(pars[7].c_str());
+        mat["emin"] = atof(pars[8].c_str());
+        mat["nb"] = atof(pars[9].c_str());
+        mat["nd"] = atof(pars[10].c_str());
+        mat["Ado"] = atof(pars[11].c_str());
+        mat["z_max"] = atof(pars[12].c_str());
+        mat["cz"] = atof(pars[13].c_str());
+        mat["ce"] = atof(pars[14].c_str());
+        mat["phic"] = atof(pars[15].c_str());
+        mat["nu"] = atof(pars[16].c_str());
+        mat["cgd"] = atof(pars[17].c_str());
+        mat["cdr"] = atof(pars[18].c_str());
+
+        mat["ckaf"] = atof(pars[19].c_str());
+        mat["Q"] = atof(pars[20].c_str());
+        mat["R"] = atof(pars[21].c_str());
+        mat["m"] = atof(pars[22].c_str());
+        mat["Fsed_min"] = atof(pars[23].c_str());
+        mat["p_sedo"] = atof(pars[24].c_str());
+        mat["K0"] = atof(pars[29].c_str());
+
+        mat["mean"] = atof(pars[30].c_str());
+        mat["COV"] = atof(pars[31].c_str());
+        mat["Ly"] = atof(pars[32].c_str());
+        mat["realization"] =atoi(pars[33].c_str());
+        mat["concurrency"] =atoi(pars[34].c_str());
+        mat["Variable"] = pars[35].c_str();
+    }
+    else if (!matType.compare("PDMY03"))
+    {
+        mat["nd"] = atoi(pars[1].c_str());
+        mat["rho"] = atof(pars[2].c_str());
+        mat["refShearModul"] = atof(pars[3].c_str());
+        mat["refBulkModul"] = atof(pars[4].c_str());
+        mat["frictionAng"] = atof(pars[5].c_str());
+        mat["peakShearStra"] = atof(pars[6].c_str());
+        mat["refPress"] = atof(pars[7].c_str());
+        mat["pressDependCoe"] = atof(pars[8].c_str());
+        mat["PTAng"] = atof(pars[9].c_str());
+        mat["mType"] = atoi(pars[10].c_str());
+        mat["ca"] = atof(pars[11].c_str());
+        mat["cb"] = atof(pars[12].c_str());
+        mat["cc"] = atof(pars[13].c_str());
+        mat["cd"] = atof(pars[14].c_str());
+        mat["ce"] = atof(pars[15].c_str());
+        mat["da"] = atof(pars[16].c_str());
+        mat["db"] = atof(pars[17].c_str());
+        mat["dc"] = atof(pars[18].c_str());
+        mat["noYieldSurf"] = atof(pars[19].c_str());
+        mat["liquefac1"] = atof(pars[20].c_str());
+        mat["liquefac2"] = atof(pars[21].c_str());
+        mat["pa"] = atof(pars[22].c_str());
+        mat["s0"] = atof(pars[23].c_str());
+    }
+    else if (!matType.compare("PDMY03_Random"))
+    {
+        mat["nd"] = atoi(pars[1].c_str());
+        mat["rho"] = atof(pars[2].c_str());
+        mat["refShearModul"] = atof(pars[3].c_str());
+        mat["refBulkModul"] = atof(pars[4].c_str());
+        mat["frictionAng"] = atof(pars[5].c_str());
+        mat["peakShearStra"] = atof(pars[6].c_str());
+        mat["refPress"] = atof(pars[7].c_str());
+        mat["pressDependCoe"] = atof(pars[8].c_str());
+        mat["PTAng"] = atof(pars[9].c_str());
+        mat["mType"] = atoi(pars[10].c_str());
+        mat["ca"] = atof(pars[11].c_str());
+        mat["cb"] = atof(pars[12].c_str());
+        mat["cc"] = atof(pars[13].c_str());
+        mat["cd"] = atof(pars[14].c_str());
+        mat["ce"] = atof(pars[15].c_str());
+        mat["da"] = atof(pars[16].c_str());
+        mat["db"] = atof(pars[17].c_str());
+        mat["dc"] = atof(pars[18].c_str());
+        mat["noYieldSurf"] = atof(pars[19].c_str());
+        mat["liquefac1"] = atof(pars[20].c_str());
+        mat["liquefac2"] = atof(pars[21].c_str());
+        mat["pa"] = atof(pars[22].c_str());
+        mat["s0"] = atof(pars[23].c_str());
+
+        mat["mean"] = atof(pars[28].c_str());
+        mat["COV"] = atof(pars[29].c_str());
+        mat["Ly"] = atof(pars[30].c_str());
+        mat["realization"] =atoi(pars[31].c_str());
+        mat["concurrency"] =atoi(pars[32].c_str());
+        mat["Variable"] = pars[33].c_str();
+
+    } else if (!matType.compare("Elastic_Random")) {
+        double density = atof(pars[0].c_str());
+        double E = atof(pars[1].c_str());
+        double poisson = atof(pars[2].c_str());
+
+        mat["E"] = E;
+        mat["poisson"] = poisson;
+        mat["density"] = density;
+
+        mat["mean"] = atof(pars[7].c_str());
+        mat["COV"] = atof(pars[8].c_str());
+        mat["Ly"] = atof(pars[9].c_str());
+        mat["realization"] =atoi(pars[10].c_str());
+        mat["concurrency"] =atoi(pars[11].c_str());
+        mat["Variable"] = pars[12].c_str();
     }
     return mat;
 }
@@ -1732,7 +1840,7 @@ bool RockOutcrop::copyDir(const QDir& from, const QDir& to, bool cover=true)
 {
 
     if (!to.exists())
-        {
+    {
         if (!to.mkdir(to.absolutePath()))
             return false;
     } else {
